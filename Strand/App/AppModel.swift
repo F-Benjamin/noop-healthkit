@@ -368,7 +368,7 @@ final class AppModel: ObservableObject {
             .removeDuplicates()
             .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
-                Task { [weak self] in await self?.refreshAfterCompletedBackfill() }
+                self?.enqueuePostBackfillPipeline()
             }
             .store(in: &hrCancellables)
 
@@ -381,6 +381,14 @@ final class AppModel: ObservableObject {
         rehydrateActiveWorkout()
 
         AppModel.shared = self   // publish for App Intents (Shortcuts) , see the static above (#42)
+
+        // A retired installation is deliberately inert. All stored properties are initialized at this
+        // point, so returning here prevents analysis timers, source wiring, BLE intent restoration and
+        // every launch pipeline from being created while still allowing the final retired screen to render.
+        if NoopRetirement.isRetired {
+            ble.disconnect()
+            return
+        }
 
         // Seed the BLE client with the persisted "Continuous HRV capture" intent so `wantsRealtime`
         // reflects it from launch , the reconciler then arms the dense stream as soon as the strap bonds
@@ -439,10 +447,16 @@ final class AppModel: ObservableObject {
             // BEFORE the Effort rescore + analyzeRecent loop so both operate on a cleaned DB. Persisted
             // flag → no-op on every subsequent launch; idempotent on a clean DB.
             await self.intelligence.runTimestampHealIfNeeded()
-            // One-shot on-upgrade Effort rescore (#313): recompute strain from source across the FULL
-            // history once, so any deep-history rows an older build left on the 0–21 axis regenerate on
-            // the 0–100 axis. Guarded by a persisted flag, so this is a no-op on every subsequent launch.
-            await self.intelligence.runEffortRescoreIfNeeded()
+            // Historical Effort migration is deliberately not run from app startup. A full-history pass
+            // can take minutes on a data-rich phone and makes the foreground unusable. Historical repair
+            // belongs behind an explicit maintenance action; automatic scoring only handles last night.
+
+            // This loop is only a steady-state backstop: every completed offload already starts its own
+            // data-driven score pass. Running the first tick immediately made a cold launch with a large
+            // history enter the full 21-day SleepStager pass while SwiftUI was drawing Today. Delay the
+            // first backstop exactly like every later one so launch remains interactive; real new data is
+            // still scored by refreshAfterCompletedBackfill as soon as the offload completes.
+            try? await Task.sleep(nanoseconds: 1_800_000_000_000)  // 30 min backstop (#836 battery)
             while !Task.isCancelled {
                 // #547 RE-POLLUTION: a sync since the last tick may have armed a re-heal (its ingest gate
                 // dropped bad-clock records). `runTimestampHealIfNeeded` honours the pending flag even after
@@ -473,7 +487,7 @@ final class AppModel: ObservableObject {
                                                      log: { [live = self.live] line in
                                                          live.append(log: line)
                                                      }) {
-                    await self.intelligence.analyzeRecent(force: false)
+                    await self.intelligence.analyzeRecent(maxDays: 1, force: false)
                 }
                 // v5: recompute the skin-temp suite snapshots (cycle phase + body clock) from the
                 // freshly-scored history so the Health hub cards read a ready result.
@@ -606,7 +620,7 @@ final class AppModel: ObservableObject {
         guard repoMoved else { return }
         live.append(log: "Read spine re-pointed to active device after registry change (#814).")
         await repo.refresh()
-        await intelligence.analyzeRecent()
+        await intelligence.analyzeRecent(maxDays: 1)
     }
 
     #if os(iOS)
@@ -616,6 +630,27 @@ final class AppModel: ObservableObject {
     /// while this type is shared with macOS, and the bridge is a `@StateObject` the app scene owns.
     var healthWriteBack: (() async -> Void)?
     #endif
+
+    /// One serial post-offload lane. HISTORY_COMPLETE can arrive in several firmware slices; while one
+    /// lane is running, further completions only request one trailing pass instead of creating parallel
+    /// Repository, SleepStager and HealthKit work.
+    private var postBackfillPipelineRunning = false
+    private var postBackfillPipelinePending = false
+
+    private func enqueuePostBackfillPipeline() {
+        postBackfillPipelinePending = true
+        guard !postBackfillPipelineRunning else { return }
+        postBackfillPipelineRunning = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.postBackfillPipelineRunning = false }
+            while self.postBackfillPipelinePending && !Task.isCancelled {
+                self.postBackfillPipelinePending = false
+                await self.refreshAfterCompletedBackfill()
+                await Task.yield()
+            }
+        }
+    }
 
     /// Settle a re-score that is owed (#1538) — one an earlier attempt started and was killed partway
     /// through, or one a background trigger deferred rather than start where it could not finish.
@@ -630,7 +665,7 @@ final class AppModel: ObservableObject {
     func runDeferredRescoreIfOwed() async {
         guard RescoreBackgroundScheduler.isRescoreOwed else { return }
         live.append(log: "re-score: resuming a pass an earlier attempt could not finish (#1538)")
-        await intelligence.analyzeRecent()
+        await intelligence.analyzeRecent(maxDays: 1)
         #if os(iOS)
         // The deferred pass is the one that finally produces today's score, and it runs with no UI
         // attached — so publish the snapshot here too, for the same reason the post-offload path does.
@@ -640,7 +675,17 @@ final class AppModel: ObservableObject {
 
     private func refreshAfterCompletedBackfill() async {
         live.append(log: "Backfill: refreshing dashboard cache from completed sync")
-        await repo.refresh(days: 120)
+        // Raw/decoded BLE rows first converge into the canonical persistent health queue. This step has
+        // no HealthKit dependency, so authorization or healthd failures can never lose source data.
+        if let store = await repo.storeHandle() {
+            do {
+                let normalized = try await HealthMeasurementNormalizer.normalizeNextSlice(
+                    store: store, deviceId: repo.deviceId)
+                live.append(log: "Health normalize: HR=\(normalized.heartRates) SDNN=\(normalized.sdnn) queued")
+            } catch {
+                live.append(log: "Health normalize failed: \(error.localizedDescription)")
+            }
+        }
         // Score the freshly-offloaded raw data RIGHT NOW rather than waiting for the next 15-minute
         // analyzeRecent tick , otherwise a just-synced night's Charge / Effort / Rest can take up to
         // 15 minutes to appear on a strap-only (no-import) dashboard. analyzeRecent no-ops if a tick is
@@ -658,7 +703,7 @@ final class AppModel: ObservableObject {
         // and hand it to a background-processing task when it cannot. A no-op on macOS, and on iOS a
         // foreground pass is never deferred.
         await RescoreBackgroundScheduler.run(log: { [live] line in live.append(log: line) }) {
-            await intelligence.analyzeRecent(skipIfUnchanged: true)
+            await intelligence.analyzeRecent(maxDays: 1, skipIfUnchanged: true)
         }
         await refreshV5Signals()
         #if os(iOS)

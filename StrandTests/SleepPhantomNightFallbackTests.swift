@@ -12,6 +12,21 @@ import StrandAnalytics
 /// header + a real edit target, so `buildModel` can never blank a non-empty history. Pure (no store,
 /// no view mounting). Android twin: SleepPhantomNightFallbackTest.kt.
 final class SleepPhantomNightFallbackTests: XCTestCase {
+    func testFreshnessUsesNewRepositoryNightWhileHeroIsStillStale() {
+        let oldWake = 1_789_322_400
+        let newWake = 1_789_409_548
+        let fresh = CachedSleepSession(startTs: newWake - 8 * 3_600,
+                                       endTs: newWake,
+                                       efficiency: 0.95,
+                                       restingHr: 47,
+                                       avgHrv: 71,
+                                       stagesJSON: nil)
+
+        XCTAssertEqual(latestSleepWakeTs(heroWakeTs: oldWake,
+                                         cachedSessions: [fresh],
+                                         expandedSessions: []), newWake)
+    }
+
 
     /// THE #940 PHANTOM: a userEdited row whose corrected window is future-dated and staged as a
     /// single all-wake segment (SleepWindowReclip's deliberate fallback). Detected key stays at the

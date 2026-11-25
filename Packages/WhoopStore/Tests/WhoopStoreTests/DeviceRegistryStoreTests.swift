@@ -84,6 +84,50 @@ final class DeviceRegistryStoreTests: XCTestCase {
         XCTAssertNil(seeded?.peripheralId)
     }
 
+    func testConsolidatesArchivedWhoopRawAliasIntoActiveSerialRow() throws {
+        let dbq = try makeDB(); let store = DeviceRegistryStore(dbQueue: dbq)
+        let pid = "F42E8C74-49F3-4252-A11F-4DBD8A7EEB16"
+        try store.setPeripheralId("my-whoop", peripheralId: pid)
+        try store.add(PairedDevice(id: "whoop-5AG12345678", brand: "WHOOP", model: "5.0 MG",
+                                   peripheralId: pid, sourceKind: .liveBLE, capabilities: [.hr, .hrv],
+                                   status: .paired, addedAt: 2, lastSeenAt: 2))
+        try store.setActive("whoop-5AG12345678")
+        try store.archive("my-whoop")
+        try dbq.write { db in
+            try db.execute(sql: "INSERT INTO hrSample (deviceId, ts, bpm) VALUES ('my-whoop', 10, 55)")
+            try db.execute(sql: "INSERT INTO hrSample (deviceId, ts, bpm) VALUES ('whoop-5AG12345678', 10, 60)")
+            try db.execute(sql: "INSERT INTO hrSample (deviceId, ts, bpm) VALUES ('my-whoop', 11, 56)")
+            try db.execute(sql: "INSERT INTO dailyMetric (deviceId, day) VALUES ('my-whoop', '2026-09-07')")
+        }
+
+        XCTAssertEqual(try store.consolidateArchivedWhoopRawAliases(), 1)
+        XCTAssertEqual(try hrCount(dbq, "whoop-5AG12345678"), 2)
+        XCTAssertEqual(try hrCount(dbq, "my-whoop"), 0)
+        XCTAssertFalse(try store.all().contains(where: { $0.id == "my-whoop" }),
+                       "obsolete strap must disappear from the registry")
+        let importedDaily = try dbq.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM dailyMetric WHERE deviceId='my-whoop'") ?? 0
+        }
+        XCTAssertEqual(importedDaily, 1, "canonical imported/derived history must stay canonical")
+        XCTAssertEqual(try store.consolidateArchivedWhoopRawAliases(), 0, "repair is idempotent")
+    }
+
+    func testRemovesAlreadyClearedLegacyAliasAfterPreviousRepair() throws {
+        let dbq = try makeDB(); let store = DeviceRegistryStore(dbQueue: dbq)
+        let pid = "F42E8C74-49F3-4252-A11F-4DBD8A7EEB16"
+        try store.add(PairedDevice(id: "whoop-5AG12345678", brand: "WHOOP", model: "5.0 MG",
+                                   peripheralId: pid, sourceKind: .liveBLE, capabilities: [.hr, .hrv],
+                                   status: .paired, addedAt: 2, lastSeenAt: 2))
+        try store.setActive("whoop-5AG12345678")
+        try store.archive("my-whoop")
+        // This is the exact state left by the first repair shipped to the phone: legacy row retained,
+        // but its duplicate peripheral id already cleared.
+        try store.setPeripheralId("my-whoop", peripheralId: nil)
+
+        XCTAssertEqual(try store.consolidateArchivedWhoopRawAliases(), 1)
+        XCTAssertEqual(try store.all().map(\.id), ["whoop-5AG12345678"])
+    }
+
     func testPeripheralIdRoundTripsThroughAddAndAll() throws {
         let store = DeviceRegistryStore(dbQueue: try makeDB())
         let pid = "8E1A2B3C-4D5E-6F70-8192-A3B4C5D6E7F8"

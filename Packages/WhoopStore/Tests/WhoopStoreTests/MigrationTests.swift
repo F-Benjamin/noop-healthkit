@@ -4,6 +4,22 @@ import WhoopProtocol
 @testable import WhoopStore
 
 final class MigrationTests: XCTestCase {
+    func testPreV44UpgradeCreatesClosedCanonicalOwnershipSchemaWithoutPendingReplay() throws {
+        let queue = try DatabaseQueue()
+        let migrator = WhoopStore.makeMigrator()
+        try migrator.migrate(queue, upTo: "v43-coach-messages")
+        try migrator.migrate(queue)
+        try queue.read { db in
+            XCTAssertTrue(try db.tableExists("healthMeasurement"))
+            XCTAssertTrue(try db.tableExists("healthKitOwnedObject"))
+            let pending = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM healthMeasurement WHERE healthKitStatus = 'pending'")
+            XCTAssertEqual(pending, 0, "migration itself must never recreate historical pending exports")
+            let columns = try db.columns(in: "healthMeasurement").map(\.name)
+            XCTAssertTrue(columns.contains("sourceIdentifier"))
+            XCTAssertTrue(columns.contains("clockEpoch"))
+            XCTAssertTrue(columns.contains("rateContext"))
+        }
+    }
     func testInMemoryRunsMigrations() async throws {
         let store = try await WhoopStore.inMemory()
         let tables = try await store.tableNames()

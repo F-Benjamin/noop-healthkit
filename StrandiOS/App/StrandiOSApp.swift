@@ -2,6 +2,28 @@
 import SwiftUI
 import StrandDesign
 import UserNotifications
+import UIKit
+
+/// A CoreBluetooth notification wakes a backgrounded app only briefly. The decoded rows are committed
+/// before `onBevelDataBanked` fires, but the unstructured HealthKit task used to outlive that wake with no
+/// execution assertion, so iOS could suspend it before `HKHealthStore.save` ran. Hold a short UIKit
+/// background task around the write and release it on completion or expiration.
+@MainActor
+private final class HealthWritebackExecutionLease {
+    private var identifier: UIBackgroundTaskIdentifier = .invalid
+
+    init() {
+        identifier = UIApplication.shared.beginBackgroundTask(withName: "NOOP Health writeback") {
+            Task { @MainActor [weak self] in self?.end() }
+        }
+    }
+
+    func end() {
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
+    }
+}
 
 /// iOS entry point. Unlike the macOS app (which adds a `MenuBarExtra` scene), iOS uses a single
 /// `WindowGroup`; the glanceable menu-bar role is filled by the Home/Lock-Screen widget instead.
@@ -61,7 +83,7 @@ struct StrandiOSApp: App {
         // only delivers a background task whose identifier was registered at launch AND listed in the
         // target's BGTaskSchedulerPermittedIdentifiers (project.yml). Without this the overnight drop
         // never fires; the macOS timer, foreground catch-up, and "Run now" already work without it.
-        ScheduledDebugExport.register()
+        if !NoopRetirement.isRetired { ScheduledDebugExport.register() }
         // Foreground presentation: without a delegate, iOS suppresses a notification's banner while the app
         // is open, so a user testing the wind-down reminder with NOOP foregrounded sees nothing. Register
         // before the first scene so any early-fired notification is presented.
@@ -79,19 +101,24 @@ struct StrandiOSApp: App {
         // start the same doomed pass again. This processing task is where that work is escalated to; it is
         // the long, deferrable kind rather than the metered refresh kind the two schedulers above use.
         // Registered before launch finishes and permitted in project.yml, or iOS never delivers it.
-        RescoreBackgroundScheduler.register { [weak model] in
-            await model?.runDeferredRescoreIfOwed()
+        if !NoopRetirement.isRetired {
+            RescoreBackgroundScheduler.register { [weak model] in
+                await model?.runDeferredRescoreIfOwed()
+            }
         }
         let bridge = HealthKitBridge(
             repo: model.repo,
-            appleDeviceId: model.appleDeviceId,
-            noopDeviceId: model.deviceId
+            appleDeviceId: model.appleDeviceId
         )
         _health = StateObject(wrappedValue: bridge)
+        // Health write-back starts only from AppModel's serial post-offload lane. Per-packet callbacks
+        // previously exported while SQLite was still ingesting the same offload, overlapping storage,
+        // sleep analysis and HealthKit work at the worst possible moment.
+        model.ble.onBevelDataBanked = nil
         // Register a separate, always-on-while-authorized refresh task for Apple Health write-back.
         // The operation is write-only and bounded to the bridge's recent window; fresh BLE offloads still
         // use the immediate hook below. BGTaskScheduler chooses the actual wake time.
-        HealthWritebackBackgroundScheduler.register { [weak bridge] in
+        if !NoopRetirement.isRetired { HealthWritebackBackgroundScheduler.register { [weak bridge] in
             guard let bridge else { return false }
             let succeeded = await bridge.writeBackAfterNewData()
             // A person can revoke every write type in Settings while NOOP is closed. Stop requesting
@@ -100,7 +127,7 @@ struct StrandiOSApp: App {
                 HealthWritebackBackgroundScheduler.cancel()
             }
             return succeeded
-        }
+        } }
         // #1021: publish to Apple Health when an offload lands, not only on foreground entry - the
         // scenePhase pass below starts the offload and wrote to Health in parallel with it, so a night
         // synced on open only reached Health at the next launch. Weak so the scene owns the bridge's
@@ -279,6 +306,20 @@ struct StrandiOSApp: App {
                 // waiting for the next foreground. activate() is idempotent + a no-op where WC isn't
                 // supported, so this is safe on every device/simulator combination.
                 .task {
+                    // Run the one-shot HealthKit validation probes before any normal launch work. A
+                    // WatchConnectivity push can wait for its peer and previously prevented the probe
+                    // argument from ever being reached, making the controlled test look as though it had
+                    // run while leaving the sample untouched.
+                    #if DEBUG
+                    if ProcessInfo.processInfo.arguments.contains("--noop-local-decommission") {
+                        do { _ = try await NoopLocalDecommission.run(model: model) }
+                        catch { print("[NOOPRetirement] STOP error=\(error.localizedDescription) writes=0 deletes=0 corrections=0") }
+                        return
+                    } else if ProcessInfo.processInfo.arguments.contains("--noop-healthkit-readonly-recent-writes-audit") {
+                        await health.runReadOnlyRecentWritesAudit()
+                        return
+                    }
+                    #endif
                     watch.activate()
                     await watch.pushLatest(from: model)
                 }
@@ -292,6 +333,11 @@ struct StrandiOSApp: App {
         // HealthKitBridge.sync guards on `auth == .authorized`, so the scenePhase trigger stays a
         // safe no-op until the user opts in.
         .onChange(of: scenePhase) { _, phase in
+            guard !NoopRetirement.isRetired else {
+                model.disconnect()
+                HealthWritebackBackgroundScheduler.cancel()
+                return
+            }
             if phase == .active {
                 model.drainPendingIntents(router: router)
                 // Re-arm the strap's smart alarm on foreground: the firmware alarm is a single instant
@@ -311,24 +357,20 @@ struct StrandiOSApp: App {
                 // and the watch showing stale numbers for the entire re-score every time the app is
                 // opened, which is a worse regression than the bug being fixed. `analyzeRecent`
                 // serialises itself, so overlapping with the sync this foreground also kicks off is safe.
-                Task { await model.runDeferredRescoreIfOwed() }
-                Task {
-                    health.refreshAuthIfPreviouslyGranted()
-                    HealthWritebackBackgroundScheduler.updateSchedule(
-                        isAuthorized: health.auth == .authorized)
-                    await HealthSyncRefreshCoordinator.run(
-                        sync: { await health.sync() },
-                        refresh: {
-                            await model.refreshAfterAppleHealthSync(
-                                authorized: health.auth == .authorized)
-                        }
-                    )
-                    await WidgetSnapshot.publish(from: model)
-                    // Push the wrist on the SAME refresh as the Home-screen widget so the watch, the
-                    // widget and Today never disagree about which day they describe. Without this the
-                    // watch only ever holds placeholder data on a real device.
-                    await watch.pushLatest(from: model)
+                // A previously interrupted multi-minute pass must never run during first paint. It was
+                // saturating the same launch window as Today layout and Health write-back. Queue it for
+                // BGProcessing; a completed offload still schedules/settles scoring through its normal path.
+                if RescoreBackgroundScheduler.isRescoreOwed {
+                    RescoreBackgroundScheduler.schedule()
                 }
+                // Do not access HealthKit while the foreground BLE offload is starting. The completed
+                // offload lane performs analysis and export sequentially after SQLite ingestion is quiet.
+                health.refreshAuthIfPreviouslyGranted()
+                // Health authorization survives uninstall/reinstall. Rebuild only the NOOP ownership
+                // ledger before any exporter can advance beyond phase 1; this method performs no writes.
+                Task { await health.reconcileExistingAuthorizationIfNeeded() }
+                HealthWritebackBackgroundScheduler.updateSchedule(
+                    isAuthorized: health.auth == .authorized)
             } else if phase == .background {
                 // Re-submit on every transition because iOS may discard an old best-effort request.
                 HealthWritebackBackgroundScheduler.updateSchedule(

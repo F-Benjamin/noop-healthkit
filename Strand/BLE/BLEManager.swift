@@ -1401,6 +1401,9 @@ public final class BLEManager: NSObject, ObservableObject {
         // its own concurrency).
         let registry = DeviceRegistryStore(dbQueue: store.registryWriter)
         self.registryStore = registry
+        if let repaired = try? registry.consolidateArchivedWhoopRawAliases(), repaired > 0 {
+            log("Removed \(repaired) obsolete WHOOP pairing(s) — raw history merged into the active strap")
+        }
         seedLastSyncFromActiveStrap(registry: registry)
         if let activeId = try? registry.activeDeviceId(), !activeId.isEmpty {
             // #1881: adopt the active id ONLY when the active device is a WHOOP. This is the line the
@@ -1436,6 +1439,7 @@ public final class BLEManager: NSObject, ObservableObject {
                               onBanked: { [weak self] c in
                                   // Live path: hr/rr are all the realtime decoder yields.
                                   self?.liveHr += c.hr; self?.liveRr += c.rr
+                                  self?.onBevelDataBanked?()
                               })
         // The store can finish bootstrapping AFTER connect(model:) already ran (both wait on
         // poweredOn), so apply the family/clock configuration here too — whichever runs last wins.
@@ -5228,7 +5232,14 @@ public final class BLEManager: NSObject, ObservableObject {
     }
 
     /// Parse a standard BLE Heart Rate Measurement (0x2A37) via the pure StandardHeartRate parser.
+    var onBevelDataBanked: (() -> Void)?
+    private var bevelSessionID = UUID().uuidString
+
     private func parseStandardHR(_ data: [UInt8]) {
+        if isWhoop5 {
+            collector?.ingestBevelCapture(BevelCapture(session: bevelSessionID,
+                receivedAt: Date().timeIntervalSince1970, bytes: data))
+        }
         guard let m = StandardHeartRate.parse(data) else {
             log("HR notify parse failed: \(hex(data))")
             return
@@ -5317,6 +5328,11 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
     }
 
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        if NoopRetirement.isRetired {
+            central.stopScan()
+            if let peripheral { central.cancelPeripheralConnection(peripheral) }
+            return
+        }
         log("Central state: \(central.state.rawValue) (5 = poweredOn)")
         // #391: ANY state update means the cold-start settling window moved on — a pending
         // unauthorized-settle escalation is obsolete whether the new state is good news (poweredOn)
@@ -5610,6 +5626,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager,
                                didDisconnectPeripheral peripheral: CBPeripheral,
                                error: Error?) {
+        bevelSessionID = UUID().uuidString
         Task { @MainActor in await collector?.flush() }
         // Reboot trail: if a user reboot is in flight, this drop is the strap acting on it. Log how long
         // the link stayed up (a real reboot drops within ~1-2 s) and cancel the no-disconnect watchdog. The

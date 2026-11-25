@@ -281,6 +281,14 @@ final class Collector {
 
     /// Buffer one standard Heart-Rate-Measurement reading. No clock correlation needed —
     /// these carry a wall-clock `ts` directly. Auto-flushes ~every 30 readings (~30s).
+    /// Durable provenance for the Bevel writer; buffered and retried with standard HR.
+    func ingestBevelCapture(_ capture: BevelCapture) {
+        stdContact.append(capture.event)
+        if stdContact.count >= 30 {
+            Task { @MainActor in await self.flushStandardHR(reason: .cadence) }
+        }
+    }
+
     func ingestStandardHR(hr: Int, rr: [Int], contact: StandardHRContact? = nil, at ts: Int) {
         let acceptedHR = (30...220).contains(hr) ? 1 : 0
         let acceptedRR = rr.filter { (250...3000).contains($0) }

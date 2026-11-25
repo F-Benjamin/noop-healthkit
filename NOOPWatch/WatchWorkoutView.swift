@@ -335,6 +335,10 @@ final class WatchWorkoutSession: NSObject, ObservableObject {
     private let store = HKHealthStore()
     private var session: HKWorkoutSession?
     private var builder: HKLiveWorkoutBuilder?
+    private var workoutSyncIdentifier: String?
+    private static let workoutDayKey = "watch.healthkit.workout.day"
+    private static let workoutCountKey = "watch.healthkit.workout.count"
+    private static let workoutBreakerKey = "watch.healthkit.workout.breaker"
 
     private let hrUnit = HKUnit.count().unitDivided(by: .minute())
     private let kcalUnit = HKUnit.kilocalorie()
@@ -402,6 +406,20 @@ final class WatchWorkoutSession: NSObject, ObservableObject {
     func start() {
         #if canImport(HealthKit) && os(watchOS)
         guard HKHealthStore.isHealthDataAvailable() else { phase = .unavailable; return }
+        guard !UserDefaults.standard.bool(forKey: Self.workoutBreakerKey) else {
+            phase = .denied
+            return
+        }
+        let day = Int(Date().timeIntervalSince1970 / 86_400)
+        if UserDefaults.standard.integer(forKey: Self.workoutDayKey) != day {
+            UserDefaults.standard.set(day, forKey: Self.workoutDayKey)
+            UserDefaults.standard.set(0, forKey: Self.workoutCountKey)
+        }
+        guard UserDefaults.standard.integer(forKey: Self.workoutCountKey) < 12 else {
+            UserDefaults.standard.set(true, forKey: Self.workoutBreakerKey)
+            phase = .denied
+            return
+        }
         let status = store.authorizationStatus(for: HKQuantityType.workoutType())
         guard status == .sharingAuthorized else {
             requestAuthorization(then: true)
@@ -423,7 +441,12 @@ final class WatchWorkoutSession: NSObject, ObservableObject {
             self.builder = builder
 
             let begin = Date()
+            let stableID = "noop-watch-workout:\(UUID().uuidString)"
+            workoutSyncIdentifier = stableID
             session.startActivity(with: begin)
+            builder.addMetadata([HKMetadataKeySyncIdentifier: stableID,
+                                 HKMetadataKeySyncVersion: 1,
+                                 "NOOPOrigin": "apple-watch-live-workout"]) { _, _ in }
             builder.beginCollection(withStart: begin) { [weak self] _, _ in
                 // Collection started (or failed silently); the delegate callbacks drive the UI from here.
                 DispatchQueue.main.async { self?.phase = .active }
@@ -479,10 +502,15 @@ final class WatchWorkoutSession: NSObject, ObservableObject {
             builder.finishWorkout { [weak self] hkWorkout, _ in
                 DispatchQueue.main.async {
                     if let duration = hkWorkout?.duration { self?.elapsed = duration }
+                    if hkWorkout != nil {
+                        let count = UserDefaults.standard.integer(forKey: Self.workoutCountKey)
+                        UserDefaults.standard.set(count + 1, forKey: Self.workoutCountKey)
+                    }
                     StrandHaptic.success.play()  // milestone: the workout is banked to HealthKit
                     self?.phase = .saved
                     self?.session = nil
                     self?.builder = nil
+                    self?.workoutSyncIdentifier = nil
                 }
             }
         }

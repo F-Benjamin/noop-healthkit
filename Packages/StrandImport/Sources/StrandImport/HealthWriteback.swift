@@ -5,6 +5,22 @@ import Foundation
 /// the parsing/clamping logic is covered by `swift test` — HealthKit itself can't be unit-tested.
 public enum HealthWriteback {
 
+    /// HealthKit treats `HKMetadataKeySyncIdentifier` as the identity of one sample. A sleep night is
+    /// represented by several samples (`inBed` plus one sample per stage), so every component needs its
+    /// own stable identifier. Reusing the night identifier for every component makes HealthKit retain a
+    /// single stage from the batch.
+    public static func sleepSyncIdentifier(deviceId: String, keyStartTs: Int,
+                                           component: String) -> String {
+        "noop-sleep-v2:\(deviceId):\(keyStartTs):\(component)"
+    }
+
+    /// Shared metadata key used to remove every component of a previously exported night before its
+    /// recalculated timeline is saved. This also clears fragments that were separate on an earlier pass
+    /// and have since been bridged into one night.
+    public static func sleepNightKey(deviceId: String, keyStartTs: Int) -> String {
+        "noop-sleep-night-v2:\(deviceId):\(keyStartTs)"
+    }
+
     /// A HealthKit-agnostic sleep stage. The bridge maps these onto `HKCategoryValueSleepAnalysis`
     /// (`awake → .awake`, `light → .asleepCore`, `deep → .asleepDeep`, `rem → .asleepREM`,
     /// `unspecified → .asleepUnspecified` — the honest block for a fragment whose `stagesJSON`
@@ -62,7 +78,31 @@ public enum HealthWriteback {
             guard end > start else { continue }
             out.append(StageInterval(start: start, end: end, kind: kind))
         }
-        return out.sorted { $0.start < $1.start }
+        return disjointStageTimeline(out)
+    }
+
+    /// Converts possibly overlapping source stages into one mutually-exclusive timeline. At every
+    /// elementary interval, awake wins (a physiological interruption must not be hidden), followed by
+    /// deep, REM, light and unspecified. Adjacent intervals of the same kind are folded back together.
+    public static func disjointStageTimeline(_ source: [StageInterval]) -> [StageInterval] {
+        let valid = source.filter { $0.end > $0.start }
+        let edges = Array(Set(valid.flatMap { [$0.start, $0.end] })).sorted()
+        guard edges.count >= 2 else { return [] }
+        func rank(_ kind: StageKind) -> Int {
+            switch kind { case .awake: return 5; case .deep: return 4; case .rem: return 3
+            case .light: return 2; case .unspecified: return 1 }
+        }
+        var result: [StageInterval] = []
+        for (start, end) in zip(edges, edges.dropFirst()) where end > start {
+            guard let winner = valid.filter({ $0.start < end && start < $0.end })
+                .max(by: { rank($0.kind) < rank($1.kind) }) else { continue }
+            if let last = result.last, last.end == start, last.kind == winner.kind {
+                result[result.count - 1] = StageInterval(start: last.start, end: end, kind: winner.kind)
+            } else {
+                result.append(StageInterval(start: start, end: end, kind: winner.kind))
+            }
+        }
+        return result
     }
 
     /// JSON numbers arrive as Int, Double, or NSNumber depending on the writer; accept all.
@@ -149,7 +189,7 @@ public enum HealthWriteback {
                 keyStartTs: frags.map(\.startTs).min() ?? 0,
                 spanStart: start,
                 spanEnd: end,
-                intervals: intervals,
+                intervals: disjointStageTimeline(intervals),
                 allKeyStartTs: frags.map(\.startTs).sorted()))
         }
         return out

@@ -27,6 +27,30 @@ public struct HRWindowStats: Sendable, Equatable {
 }
 
 extension WhoopStore {
+    /// Dedicated packet provenance; never mixes realtime and historical RR tables.
+    public func firstBevelCaptureTimestamp(deviceId: String) async throws -> Int? {
+        try syncRead { db in
+            try Int.fetchOne(db, sql: "SELECT MIN(ts) FROM event WHERE deviceId = ? AND kind GLOB 'BEVEL_HR_*'", arguments: [deviceId])
+        }
+    }
+
+    public func bevelCaptures(deviceId: String, from: Int, to: Int) async throws -> [BevelCapture] {
+        try syncRead { db in
+            try Row.fetchAll(db, sql: """
+                SELECT ts, kind, payloadJSON FROM event
+                WHERE deviceId = ? AND ts >= ? AND ts < ? AND kind GLOB 'BEVEL_HR_*'
+                ORDER BY ts, kind
+                """, arguments: [deviceId, from, to]).map { row in
+                let payload = try WhoopStore.eventDecoder.decode([String: ParsedValue].self,
+                    from: Data((row["payloadJSON"] as String).utf8))
+                guard let capture = BevelCapture(event: WhoopEvent(ts: row["ts"], kind: row["kind"], payload: payload)) else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                return capture
+            }
+        }
+    }
+
     /// Shared decoder, JSONDecoder is stateless across decodes and was previously allocated once
     /// per event row. Battery events are dense (~every 8 min), so a multi-year read decodes
     /// thousands of rows; reusing one decoder removes that per-row allocation.

@@ -911,6 +911,54 @@ extension WhoopStore {
             // No index: the table is capped at maxStoredMessages (40 rows), so a full scan + sort on
             // read is negligible and an index buys nothing worth the extra Room<->GRDB parity surface.
         }
+        migrator.registerMigration("v44-normalized-health-measurements") { db in
+            try db.create(table: "healthMeasurement", options: [.ifNotExists]) { t in
+                t.column("id", .text).primaryKey()
+                t.column("metric", .text).notNull()
+                t.column("startTs", .double).notNull()
+                t.column("endTs", .double).notNull()
+                t.column("value", .double)
+                t.column("unit", .text)
+                t.column("categoryValue", .integer)
+                t.column("deviceId", .text).notNull()
+                t.column("source", .text).notNull()
+                t.column("quality", .text).notNull()
+                t.column("sourceSequence", .integer)
+                t.column("metadataJSON", .text).notNull().defaults(to: "{}")
+                t.column("receivedAt", .double)
+                t.column("processedAt", .double).notNull()
+                t.column("healthKitUUID", .text)
+                t.column("healthKitStatus", .text).notNull()
+                t.column("healthKitAttempts", .integer).notNull().defaults(to: 0)
+                t.column("healthKitLastError", .text)
+                t.column("healthKitWrittenAt", .double)
+            }
+            try db.create(index: "healthMeasurement_pending",
+                          on: "healthMeasurement", columns: ["deviceId", "metric", "healthKitStatus", "startTs"],
+                          options: [.ifNotExists])
+        }
+        migrator.registerMigration("v45-healthkit-sync-version") { db in
+            try db.alter(table: "healthMeasurement") { table in
+                table.add(column: "healthKitSyncVersion", .integer).notNull().defaults(to: 1)
+            }
+        }
+        migrator.registerMigration("v46-healthkit-source-identity") { db in
+            try db.alter(table: "healthMeasurement") { table in
+                table.add(column: "sourceIdentifier", .text).notNull().defaults(to: "noop")
+                table.add(column: "clockEpoch", .text)
+                table.add(column: "rateContext", .text).notNull().defaults(to: HealthRateContext.background.rawValue)
+            }
+        }
+        migrator.registerMigration("v47-healthkit-owned-objects") { db in
+            try db.create(table: "healthKitOwnedObject", options: [.ifNotExists]) { t in
+                t.column("syncIdentifier", .text).primaryKey()
+                t.column("healthKitUUID", .text).notNull()
+                t.column("sampleType", .text).notNull()
+                t.column("startTs", .double).notNull()
+                t.column("endTs", .double).notNull()
+                t.column("lastSeenAt", .double).notNull()
+            }
+        }
         return migrator
     }
 }

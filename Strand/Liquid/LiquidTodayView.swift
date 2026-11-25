@@ -308,7 +308,11 @@ struct LiquidTodayView: View {
 
                 liquidRefreshIndicator   // grows in the revealed space; a vessel filling with the pull
 
-                VStack(alignment: .leading, spacing: 12) {
+                // This dashboard can contain dozens of charts/cards. Building every off-screen section
+                // during the score-ring launch animation saturates SwiftUI's layout engine and makes the
+                // app look frozen on a data-rich install. LazyVStack preserves the layout while limiting
+                // initial measurement to the visible viewport.
+                LazyVStack(alignment: .leading, spacing: 12) {
                     scene
                     // The strain/illness early-warning banner, dropped in the liquid Home rewrite. Liquid is
                     // the DEFAULT Today on both platforms (RootTabView.swift's liquidTodayEnabled = true,

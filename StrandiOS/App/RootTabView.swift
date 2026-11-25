@@ -65,6 +65,16 @@ struct RootTabView: View {
         if liquidTodayEnabled { LiquidTodayView() } else { TodayView() }
     }
 
+    /// A native TabView eagerly evaluates every root. These roots contain chart-heavy dashboards whose
+    /// `.task` loaders all publish during launch, forcing repeated full layout passes before Today settles.
+    /// Mount only the selected root; the NavigationPath remains owned here and survives tab switches.
+    @ViewBuilder
+    private func activeTabRoot<Content: View>(_ tag: Int,
+                                              @ViewBuilder content: () -> Content) -> some View {
+        if selectedTab == tag { content() }
+        else { Color.clear }
+    }
+
     /// Native tab selection binding. SwiftUI sends taps on the already-selected item through the
     /// setter, which lets the system tab bar retain the app's refresh / pop-to-root / scroll-to-top
     /// convention without placing a custom hit-testing layer over the platform bar.
@@ -117,12 +127,12 @@ struct RootTabView: View {
         // its dynamic interaction with scrolling content automatically; older supported releases use
         // the corresponding system material and safe-area behaviour from the same TabView.
         TabView(selection: nativeTabSelection) {
-            tab(todayTabRoot, "Today", "square.grid.2x2", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
-            tab(TrendsView(), "Trends", "chart.line.uptrend.xyaxis", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
-            tab(SleepView(), "Sleep", "bed.double", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
+            tab(activeTabRoot(0) { todayTabRoot }, "Today", "square.grid.2x2", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
+            tab(activeTabRoot(1) { TrendsView() }, "Trends", "chart.line.uptrend.xyaxis", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
+            tab(activeTabRoot(2) { SleepView() }, "Sleep", "bed.double", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
             // K3: Coach promoted to a top-level tab (was behind the More list). The sparkles icon
             // matches the More-tab row and the macOS sidebar entry.
-            tab(CoachView(), "Coach", "sparkles", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
+            tab(activeTabRoot(3) { CoachView() }, "Coach", "sparkles", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
             moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)

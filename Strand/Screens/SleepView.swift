@@ -154,7 +154,15 @@ struct SleepView: View {
                     // Each top-level section fades + rises in sequence on first appear (Reduce-Motion safe).
                     VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                         if let sleepUndo { sleepUndoBanner(sleepUndo) }
-                        SleepFreshnessNote(latestWakeTs: resolved.night.session.endTs)
+                        // The hero is memoized and may briefly still describe the preceding night while
+                        // the post-offload refresh is publishing its new session arrays. Freshness is a
+                        // data-availability verdict, so derive it from every already-loaded sleep source
+                        // as well as the hero. Otherwise a fully-scored night can be present on disk and in
+                        // `repo.sleeps` while this banner falsely says it was not detected.
+                        SleepFreshnessNote(latestWakeTs: latestSleepWakeTs(
+                            heroWakeTs: resolved.night.session.endTs,
+                            cachedSessions: repo.sleeps,
+                            expandedSessions: allSessions))
                         // Bleed past ScreenScaffold's 16/24 gutters so the hero column is edge-to-edge
                         // in the upper band; the night scene itself is the fixed topBackground.
                         // Customize sits at the end of the hero (not floating in a blank band).
@@ -2625,6 +2633,14 @@ private struct SleepFreshnessNote: View {
 }
 
 // MARK: - Local value types
+
+/// Freshest wake already known to the UI, independent of which memoized night currently owns the hero.
+/// Internal for the regression test: a newly-scored repository row must immediately defeat an older hero.
+func latestSleepWakeTs(heroWakeTs: Int?, cachedSessions: [CachedSleepSession],
+                       expandedSessions: [CachedSleepSession]) -> Int? {
+    ([heroWakeTs] + cachedSessions.map { Optional($0.endTs) }
+        + expandedSessions.map { Optional($0.endTs) }).compactMap { $0 }.max()
+}
 
 /// Cheap, Equatable fingerprint of the repo inputs SleepView derives from. Two snapshots are
 /// equal iff the data the screen reads is unchanged, so the heavy `SleepModel` rebuild is

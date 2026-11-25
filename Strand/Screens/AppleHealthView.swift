@@ -379,7 +379,7 @@ struct AppleHealthView: View {
                         .frame(width: 30, height: 30)
                         .background(StrandPalette.metricCyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                         .accessibilityHidden(true)
-                    Text("Apple Health (Live)")
+                    Text("WHOOP → Apple Health → Bevel")
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
@@ -412,7 +412,7 @@ struct AppleHealthView: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                 case .unknown, .denied:
-                    Text("Read your heart rate, HRV, blood oxygen, respiratory rate, sleep, steps and energy straight from Apple Health, and write NOOP's strap data back: sleep with full stages, continuous heart rate, workouts, and nightly vitals. Everything stays on \(Platform.deviceNounPhrase).")
+                    Text("Write WHOOP heart rate, SDNN, resting heart rate, calibrated steps, active energy, respiratory rate, calibrated SpO₂, sleep and workouts to Apple Health. No Health data is read. In Bevel choose Apple Health (SDNN).")
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -420,7 +420,7 @@ struct AppleHealthView: View {
                         Task {
                             await health.requestAuthorization()
                             await HealthSyncRefreshCoordinator.run(
-                                sync: { await health.sync() },
+                                sync: { await health.syncAllAvailable() },
                                 refresh: {
                                     await model.refreshAfterAppleHealthSync(
                                         authorized: health.auth == .authorized)
@@ -452,8 +452,11 @@ struct AppleHealthView: View {
                     }
                     Button {
                         Task {
+                            // Explicit tap: ask only for any newly added share types. HealthKit does
+                            // not re-prompt for scopes the user already decided.
+                            await health.requestAuthorization()
                             await HealthSyncRefreshCoordinator.run(
-                                sync: { await health.sync() },
+                                sync: { await health.syncAllAvailable() },
                                 refresh: {
                                     await model.refreshAfterAppleHealthSync(
                                         authorized: health.auth == .authorized)
@@ -469,6 +472,45 @@ struct AppleHealthView: View {
                     .disabled(health.syncing)
                 }
 
+                Text(health.bevelStatus)
+                    .font(StrandFont.caption)
+                Text("Safe rollout: \(health.rolloutPhase.label)")
+                    .font(StrandFont.caption.monospacedDigit())
+                    .foregroundStyle(StrandPalette.textSecondary)
+                Text("Circuit breaker: \(health.circuitBreakerStatus)")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                Text(health.healthQueueStatus)
+                    .font(StrandFont.caption.monospacedDigit())
+                    .foregroundStyle(StrandPalette.textSecondary)
+                Text(health.heartRateRetentionStatus)
+                    .font(StrandFont.caption.monospacedDigit())
+                    .foregroundStyle(StrandPalette.textSecondary)
+                if health.rolloutPhase != .allMetrics && !health.syncing {
+                    Button("Validate and enable next phase") { health.advanceSafeRollout() }
+                        .buttonStyle(.bordered)
+                }
+                if health.syncing, !health.syncProgress.isEmpty {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let elapsed = health.syncStartedAt.map {
+                            max(0, Int(context.date.timeIntervalSince($0)))
+                        } ?? 0
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Processing \(health.syncProgress)…")
+                            if health.syncTotalUnits > 0 {
+                                Text("\(health.syncCompletedUnits)/\(health.syncTotalUnits) samples · \(elapsed)s elapsed")
+                            } else {
+                                Text("\(elapsed)s elapsed · waiting for this step to complete")
+                            }
+                        }
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                    }
+                }
+                Text("Submitted this session: HR \(health.bevelSavedHeartRates) · SDNN \(health.bevelSavedSDNN) (retries are deduplicated)")
+                    .font(StrandFont.caption)
+                Text("Other Health streams submitted: \(health.savedDerivedSamples)")
+                    .font(StrandFont.caption)
                 if let err = health.lastError {
                     Text(err)
                         .font(StrandFont.footnote)

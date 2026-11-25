@@ -10,9 +10,9 @@ import XCTest
 /// written by both paths under one id, contamination there cannot be separated after the fact.
 final class SourceIdentityTests: XCTestCase {
 
-    private func row(_ id: String, _ brand: String, _ peripheralId: String?) -> PairedDevice {
+    private func row(_ id: String, _ brand: String, _ peripheralId: String?, status: DeviceStatus = .paired) -> PairedDevice {
         PairedDevice(id: id, brand: brand, model: "m", peripheralId: peripheralId,
-                     sourceKind: .liveBLE, capabilities: [.hr], status: .paired,
+                     sourceKind: .liveBLE, capabilities: [.hr], status: status,
                      addedAt: 0, lastSeenAt: 0)
     }
 
@@ -74,5 +74,13 @@ final class SourceIdentityTests: XCTestCase {
         let legacy = row("my-whoop", "", "AA:BB:CC:DD:EE:03")
         XCTAssertEqual(SourceIdentity.resolve(address: "AA:BB:CC:DD:EE:03",
                                               rows: [legacy], currentId: "oura-abc"), "my-whoop")
+    }
+
+    func testActiveRowWinsWhenArchivedAliasHasSamePeripheral() {
+        let address = "AA:BB:CC:DD:EE:04"
+        let legacy = row("my-whoop", "WHOOP", address, status: .archived)
+        let stable = row("whoop-5AG12345678", "WHOOP", address, status: .active)
+        XCTAssertEqual(SourceIdentity.resolve(address: address, rows: [legacy, stable], currentId: "my-whoop"),
+                       "whoop-5AG12345678")
     }
 }

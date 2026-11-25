@@ -21,7 +21,7 @@ settings:
     # iOS build number (CFBundleVersion). GLOBAL so the iOS app AND its widget extension inherit the
     # SAME value — they must match or iOS warns "extension version must match parent app" (#416).
     # macOS sets its own CFBundleVersion on the Strand target and is unaffected by this.
-    CURRENT_PROJECT_VERSION: "327"
+    CURRENT_PROJECT_VERSION: "328"
     SWIFT_VERSION: "5.0"
     # Emit localizable strings so Xcode auto-extracts every LocalizedStringKey into the
     # String Catalog on build (the English (US) base entries).
@@ -282,8 +282,8 @@ targets:
           - $(PRODUCT_BUNDLE_IDENTIFIER).rescore
         NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your iPhone. Nothing leaves your device."
         NSLocationWhenInUseUsageDescription: "NOOP records your route during an outdoor workout to show distance, pace, and a map, and keeps recording while the screen is off. The route stays on your device. Nothing leaves it."
-        NSHealthShareUsageDescription: "NOOP reads your own Apple Health data on-device to compute recovery, strain, and sleep. Nothing leaves your device."
-        NSHealthUpdateUsageDescription: "NOOP writes the metrics it computes from your strap back into Apple Health, on-device and only when you allow it."
+        NSHealthShareUsageDescription: "This WHOOP-to-Bevel build exports heart rate and SDNN and does not request Apple Health read access."
+        NSHealthUpdateUsageDescription: "NOOP writes measured WHOOP heart rate and SDNN calculated from R-R intervals to Apple Health for Bevel, only when you allow it."
         NSMotionUsageDescription: "NOOP reads your iPhone's step count for a walking or running workout to show steps in the activity summary. It stays on your device. Nothing leaves it."
         # K4: Coach voice input. Speech is transcribed ON-DEVICE ONLY (requiresOnDeviceRecognition);
         # the mic button is disabled where the locale doesn't support that, never falls back to
@@ -340,12 +340,9 @@ targets:
       - package: MarkdownUI
       - package: ZIPFoundation
       - package: PolarProtocol
-      - target: NOOPiOSWidgets
-      # Embed the watchOS app so the iPhone app carries it (NOOP.app/Watch/NOOPWatch.app). A watch app
-      # installs by riding inside its iOS companion; without this it would never reach a paired watch.
-      # Build-from-source delivers it for certain; sideload install of the embedded watch app under a free
-      # Apple ID is unproven (an Apple limitation), so the docs steer watch users to a source build for now.
-      - target: NOOPWatch
+      # This personal WHOOP → Health → Bevel MVP intentionally omits the widget and Watch app from
+      # the phone dependency graph. They require three additional provisioning profiles and are not
+      # involved in BLE capture or HealthKit export. Their standalone targets remain available.
 
   # WidgetKit + Live Activity extension — the iOS analogue of the macOS menu-bar
   # extra. Reads a tiny snapshot the app publishes into the shared App Group.

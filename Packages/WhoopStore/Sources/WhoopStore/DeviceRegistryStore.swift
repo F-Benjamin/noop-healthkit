@@ -103,8 +103,57 @@ public struct DeviceRegistryStore: Sendable {
     /// connected CBPeripheral back to its `PairedDevice` so multiple straps stay distinct.
     public func device(forPeripheralId peripheralId: String) throws -> PairedDevice? {
         try dbQueue.read { db in
-            try Row.fetchOne(db, sql: "SELECT * FROM pairedDevice WHERE peripheralId = ? LIMIT 1",
+            try Row.fetchOne(db, sql: """
+                SELECT * FROM pairedDevice WHERE peripheralId = ?
+                ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'paired' THEN 1 ELSE 2 END, addedAt DESC
+                LIMIT 1
+                """,
                              arguments: [peripheralId]).map(Self.decode)
+        }
+    }
+
+    /// Repair the identity split produced when a WHOOP was removed and re-added. The archived legacy row
+    /// can retain the same CoreBluetooth peripheral id as the active serial row; after an earlier repair
+    /// it may instead have a nil peripheral id but still remain visible as a removable "second strap".
+    /// Move measured/raw streams to the active row, then permanently remove the obsolete registry/device
+    /// rows so no connection path can select them again. Imported and computed daily history deliberately
+    /// stays in the canonical namespace. Transactional and idempotent; returns the number removed.
+    @discardableResult
+    public func consolidateArchivedWhoopRawAliases() throws -> Int {
+        let rawTables = [
+            "hrSample", "rrInterval", "spo2Sample", "skinTempSample", "respSample", "gravitySample",
+            "stepSample", "ppgHrSample", "event", "battery", "rawBatch", "sleepStateSample",
+            "ppgWaveformSample", "v18AuxSample",
+        ]
+        return try dbQueue.write { db in
+            guard let active = try Row.fetchOne(db, sql: """
+                SELECT * FROM pairedDevice
+                WHERE status = 'active' AND peripheralId IS NOT NULL AND TRIM(peripheralId) <> ''
+                LIMIT 1
+                """) else { return 0 }
+            let activeId: String = active["id"]
+            let activeBrand: String = active["brand"]
+            guard activeId == "my-whoop" || activeBrand.caseInsensitiveCompare("WHOOP") == .orderedSame
+            else { return 0 }
+            let peripheralId: String = active["peripheralId"]
+            let aliases = try String.fetchAll(db, sql: """
+                SELECT id FROM pairedDevice
+                WHERE status = 'archived' AND id <> ?
+                  AND (id = 'my-whoop' OR lower(brand) = 'whoop')
+                  AND (lower(peripheralId) = lower(?) OR (id = 'my-whoop' AND ? LIKE 'whoop-%'))
+                """, arguments: [activeId, peripheralId, activeId])
+            for alias in aliases {
+                for table in rawTables {
+                    try db.execute(sql: "UPDATE OR IGNORE \(table) SET deviceId = ? WHERE deviceId = ?",
+                                   arguments: [activeId, alias])
+                    try db.execute(sql: "DELETE FROM \(table) WHERE deviceId = ?", arguments: [alias])
+                }
+                // The canonical daily rows above intentionally remain addressable as `my-whoop` even
+                // without a registry row. The obsolete pairing itself must disappear completely.
+                try db.execute(sql: "DELETE FROM pairedDevice WHERE id = ?", arguments: [alias])
+                try db.execute(sql: "DELETE FROM device WHERE id = ?", arguments: [alias])
+            }
+            return aliases.count
         }
     }
 
@@ -145,7 +194,7 @@ public struct DeviceRegistryStore: Sendable {
         // v38-apple-step-hour: the hourly Apple Health step buckets are deviceId-keyed ("apple-health"),
         // so forgetting that source must clear them — otherwise an imported phone's hour-by-hour step
         // history survives the delete (the same privacy defect this list exists to close).
-        "appleStepHour",
+        "appleStepHour", "healthMeasurement",
     ]
 
     /// Permanently delete every recorded sample/derived row belonging to one device, across all

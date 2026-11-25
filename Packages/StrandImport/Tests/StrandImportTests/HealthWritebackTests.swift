@@ -2,9 +2,35 @@ import XCTest
 @testable import StrandImport
 
 final class HealthWritebackTests: XCTestCase {
+    func testOverlappingStagesBecomeMutuallyExclusiveWithDeterministicPriority() {
+        let timeline = HealthWriteback.disjointStageTimeline([
+            .init(start: 7_200, end: 9_000, kind: .light),
+            .init(start: 8_400, end: 9_600, kind: .deep),
+        ])
+        XCTAssertEqual(timeline, [
+            .init(start: 7_200, end: 8_400, kind: .light),
+            .init(start: 8_400, end: 9_600, kind: .deep),
+        ])
+    }
 
     private let start = 1_700_000_000
     private var end: Int { start + 8 * 3600 }
+
+    func testSleepComponentsHaveDistinctStableSyncIdentifiers() {
+        let inBed = HealthWriteback.sleepSyncIdentifier(
+            deviceId: "whoop-serial", keyStartTs: start, component: "in-bed")
+        let stage0 = HealthWriteback.sleepSyncIdentifier(
+            deviceId: "whoop-serial", keyStartTs: start, component: "stage-0")
+        let stage1 = HealthWriteback.sleepSyncIdentifier(
+            deviceId: "whoop-serial", keyStartTs: start, component: "stage-1")
+
+        XCTAssertEqual(inBed, "noop-sleep-v2:whoop-serial:\(start):in-bed")
+        XCTAssertEqual(Set([inBed, stage0, stage1]).count, 3)
+        XCTAssertEqual(stage0, HealthWriteback.sleepSyncIdentifier(
+            deviceId: "whoop-serial", keyStartTs: start, component: "stage-0"))
+        XCTAssertEqual(HealthWriteback.sleepNightKey(deviceId: "whoop-serial", keyStartTs: start),
+                       "noop-sleep-night-v2:whoop-serial:\(start)")
+    }
 
     private func intervals(_ json: String?) -> [HealthWriteback.StageInterval] {
         HealthWriteback.stageIntervals(stagesJSON: json, sessionStart: start, sessionEnd: end)
@@ -29,7 +55,7 @@ final class HealthWritebackTests: XCTestCase {
         [{"start": \(start), "end": \(start + 60), "stage": "wake"},
          {"start": \(start + 60), "end": \(start + 120), "stage": "awake"}]
         """
-        XCTAssertEqual(intervals(json).map(\.kind), [.awake, .awake])
+        XCTAssertEqual(intervals(json), [.init(start: start, end: start + 120, kind: .awake)])
     }
 
     func testSegmentsClampedToSessionBounds() {

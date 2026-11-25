@@ -118,3 +118,9 @@ tools/linux-capture/*.db
 tools/linux-capture/*.db-wal
 tools/linux-capture/*.db-shm
 tools/linux-capture/captures/
+
+# Private HealthKit device audits and local health exports
+/healthkit-audit-output/
+*.sqlite-wal
+*.sqlite-shm
+/export.xml

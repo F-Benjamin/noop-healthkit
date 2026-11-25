@@ -31,10 +31,14 @@ public enum SourceIdentity {
         guard let address, !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-        guard let row = rows.first(where: {
+        let matches = rows.filter {
             guard let pid = $0.peripheralId else { return false }
             return pid.caseInsensitiveCompare(address) == .orderedSame
-        }) else { return nil }
+        }
+        // A remove + re-add can leave the archived legacy row and the new serial row carrying the
+        // same peripheral id. Prefer the active row deterministically; `all()` is ordered by addedAt,
+        // so taking the first match used to route every restored/overnight packet back to `my-whoop`.
+        guard let row = matches.first(where: { $0.status == .active }) ?? matches.first else { return nil }
         guard isWhoop(row), row.id != currentId else { return nil }
         return row.id
     }

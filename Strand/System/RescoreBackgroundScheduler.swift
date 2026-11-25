@@ -205,6 +205,17 @@ enum RescoreBackgroundScheduler {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: nil) { task in
             let completion = TaskCompletionGuard(task: task)
             let worker = Task { @MainActor in
+                // A request queued overnight can be delivered in the same launch window in which the
+                // user opens the app. Give scene activation a moment to settle, then yield the pass when
+                // the app is foregrounded. Keeping the durable owed flag and resubmitting preserves the
+                // work for a later processing wake without freezing the UI the user just opened.
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                if UIApplication.shared.applicationState == .active {
+                    if isRescoreOwed { schedule() }
+                    completion.finish(success: true)
+                    return
+                }
                 await operation()
                 guard !Task.isCancelled else { return }
                 // Re-arm only while work remains. A processing task is single-shot, and re-submitting

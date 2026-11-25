@@ -702,6 +702,7 @@ final class Repository: ObservableObject {
     private var storeOpenTask: Task<WhoopStore?, Never>?
 
     private func ensureStore() async -> WhoopStore? {
+        guard !NoopRetirement.isRetired else { return nil }
         if let store { return store }
         // SINGLE-FLIGHT (measured 2026-07-01 on a 5M-row DB): several screens ask for the store at once
         // on launch (RootView refresh, AppModel init, exploreSeries). ensureStore is async and `store`
